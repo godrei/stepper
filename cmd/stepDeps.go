@@ -226,6 +226,9 @@ func currentPackageName(dir string) (string, error) {
 			return "", err
 		}
 		pkg := fmt.Sprintf("%s/%s/%s", packagePath.Host, packagePath.Owner, packagePath.Name)
+		if packagePath.IsV2 {
+			pkg += "/v2"
+		}
 
 		if rootPackage == "" {
 			rootPackage = pkg

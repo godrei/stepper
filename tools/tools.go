@@ -12,7 +12,7 @@ import (
 
 // StepmanUpdate ...
 func StepmanUpdate(stepLibURI string) error {
-	updateCmd := command.New("bitrise", "stepman", "update", "--collection", stepLibURI)
+	updateCmd := command.New("stepman", "update", "--collection", stepLibURI)
 	return updateCmd.Run()
 }
 
@@ -36,7 +36,7 @@ func StepmanExportSpec(stepLibURI string, exportType ExportTypes) (models.StepCo
 	}
 	specPth := filepath.Join(tmpDir, "spec.json")
 
-	exportCmd := command.New("bitrise", "stepman", "export-spec", "--steplib", stepLibURI, "--output", specPth, "--export-type", string(exportType))
+	exportCmd := command.New("stepman", "export-spec", "--steplib", stepLibURI, "--output", specPth, "--export-type", string(exportType))
 	if err := exportCmd.Run(); err != nil {
 		return models.StepCollectionModel{}, err
 	}

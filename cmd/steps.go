@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"os"
+	"slices"
 	"strings"
 	"text/template"
 
@@ -26,13 +27,30 @@ var bitriseStepsCmd = &cobra.Command{
 		if repoURLFilterFlag != "" {
 			repoURLFilters = strings.Split(repoURLFilterFlag, ",")
 		}
-		printTemplate := printTemplateFlag
 
-		if err := stepLister.ListSteps(&ListOptions{
-			//RepoURLFilters: []string{"https://github.com/bitrise-steplib", "https://github.com/bitrise-io"},
-			RepoURLFilters: repoURLFilters,
-			PrintTemplate:  printTemplate,
-			//PrintTemplate:  "{{range $i, $step := .}}{{$step.Repository.Owner}}/{{$step.Repository.Repo}}\n{{end}}",
+		printTemplate := printTemplateFlag
+		if printTemplate == "" {
+			printTemplate = defaultPrintTemplate
+		}
+
+		ignoreDeprecatedSteps := ignoreDeprecatedStepsFlag
+
+		var projectTypes []string
+		if projectTypesFilterFlag != "" {
+			projectTypes = strings.Split(projectTypesFilterFlag, ",")
+		}
+
+		var toolkits []string
+		if toolkitFlag != "" {
+			toolkits = strings.Split(toolkitFlag, ",")
+		}
+
+		if err := stepLister.ListSteps(ListOptions{
+			RepoURLFilters:        repoURLFilters,
+			IgnoreDeprecatedSteps: ignoreDeprecatedSteps,
+			AllowedProjectTypes:   projectTypes,
+			AllowedToolkits:       toolkits,
+			PrintTemplate:         printTemplate,
 		}); err != nil {
 			logger.Errorf(err.Error())
 			os.Exit(1)
@@ -41,14 +59,21 @@ var bitriseStepsCmd = &cobra.Command{
 }
 
 var (
-	repoURLFilterFlag string
-	printTemplateFlag string
+	repoURLFilterFlag         string
+	ignoreDeprecatedStepsFlag bool
+	printTemplateFlag         string
+	projectTypesFilterFlag    string
+	toolkitFlag               string
 )
 
 func init() {
 	RootCmd.AddCommand(bitriseStepsCmd)
-	bitriseStepsCmd.Flags().StringVarP(&repoURLFilterFlag, "repo-url-filter", "", "", "List of repo URL filters, separated by a comma character. Filters are compared to the repository URL with strings.Contains.")
-	bitriseStepsCmd.Flags().StringVarP(&printTemplateFlag, "print-template", "", "", "Template for printing the list of steps. The template is executed on the []Step.")
+
+	bitriseStepsCmd.Flags().StringVarP(&repoURLFilterFlag, "repo-url-filter", "", "", "List of repo URL filters, separated by a comma character. Filters are compared to the repository URL with 'strings.Contains'.")
+	bitriseStepsCmd.Flags().BoolVarP(&ignoreDeprecatedStepsFlag, "ignore-deprecated", "", true, "Ignore deprecated steps.")
+	bitriseStepsCmd.Flags().StringVarP(&printTemplateFlag, "print-template", "", "", "Template for printing the list of steps. The template is executed on the '[]Step' list.")
+	bitriseStepsCmd.Flags().StringVarP(&projectTypesFilterFlag, "project-types", "", "", "Filter steps by project types")
+	bitriseStepsCmd.Flags().StringVarP(&toolkitFlag, "toolkits", "", "", "Filter steps by toolkits [go,bash]")
 }
 
 type StepLister struct {
@@ -56,8 +81,11 @@ type StepLister struct {
 }
 
 type ListOptions struct {
-	RepoURLFilters []string
-	PrintTemplate  string
+	RepoURLFilters        []string
+	IgnoreDeprecatedSteps bool
+	AllowedProjectTypes   []string
+	AllowedToolkits       []string
+	PrintTemplate         string
 }
 
 type StepRepository struct {
@@ -72,7 +100,7 @@ type Step struct {
 	Repository StepRepository
 }
 
-func (l StepLister) ListSteps(opts *ListOptions) error {
+func (l StepLister) ListSteps(opts ListOptions) error {
 	steplib, err := l.getStpLibSpec()
 	if err != nil {
 		return err
@@ -83,14 +111,7 @@ func (l StepLister) ListSteps(opts *ListOptions) error {
 		return err
 	}
 
-	tmpl := ""
-	if opts != nil {
-		tmpl = opts.PrintTemplate
-	}
-	if tmpl == "" {
-		tmpl = defaultPrintTemplate
-	}
-	if err := l.printSteps(steps, tmpl); err != nil {
+	if err := l.printSteps(steps, opts.PrintTemplate); err != nil {
 		return err
 	}
 
@@ -110,44 +131,77 @@ func (l StepLister) getStpLibSpec() (models.StepCollectionModel, error) {
 	return steplib, nil
 }
 
-func (l StepLister) listSteps(steplib models.StepCollectionModel, opts *ListOptions) ([]Step, error) {
+func (l StepLister) listSteps(steplib models.StepCollectionModel, opts ListOptions) ([]Step, error) {
 	var steps []Step
 	for stepID, stepGroup := range steplib.Steps {
 		for _, step := range stepGroup.Versions {
 			if step.Source == nil {
 				l.logger.Warnf("step without source: %s", stepID)
-				break
+				continue
 			}
 
-			matches := true
+			isDeprecated := stepGroup.Info.RemovalDate != "" || stepGroup.Info.DeprecateNotes != ""
+			if isDeprecated && opts.IgnoreDeprecatedSteps {
+				continue
+			}
 
-			if opts != nil && len(opts.RepoURLFilters) > 0 {
-				matches = false
+			if len(opts.AllowedToolkits) > 0 {
+				match := false
+				for _, allowedToolkit := range opts.AllowedToolkits {
+					if allowedToolkit == "go" && (step.Toolkit != nil && step.Toolkit.Go != nil) {
+						match = true
+						break
+					}
+					if allowedToolkit == "bash" && (step.Toolkit == nil || step.Toolkit.Bash != nil) {
+						match = true
+						break
+					}
+				}
+				if !match {
+					continue
+				}
+			}
 
+			if len(opts.AllowedProjectTypes) > 0 {
+				match := false
+				for _, allowedProjectType := range opts.AllowedProjectTypes {
+					if slices.Contains(step.ProjectTypeTags, allowedProjectType) {
+						match = true
+						break
+					}
+				}
+				if !match {
+					continue
+				}
+			}
+
+			if len(opts.RepoURLFilters) > 0 {
+				matches := false
 				for _, filter := range opts.RepoURLFilters {
 					if strings.Contains(step.Source.Git, filter) {
 						matches = true
 						break
 					}
 				}
-			}
-
-			if matches {
-				gitURL, err := giturl.NewGitURL(step.Source.Git)
-				if err != nil {
-					return nil, err
+				if !matches {
+					continue
 				}
-
-				steps = append(steps, Step{
-					StepModel: models.StepModel{},
-					StepID:    stepID,
-					Repository: StepRepository{
-						Host:  gitURL.GetHostName(),
-						Owner: gitURL.GetOwnerName(),
-						Repo:  gitURL.GetRepoName(),
-					},
-				})
 			}
+
+			gitURL, err := giturl.NewGitURL(step.Source.Git)
+			if err != nil {
+				return nil, err
+			}
+
+			steps = append(steps, Step{
+				StepModel: models.StepModel{},
+				StepID:    stepID,
+				Repository: StepRepository{
+					Host:  gitURL.GetHostName(),
+					Owner: gitURL.GetOwnerName(),
+					Repo:  gitURL.GetRepoName(),
+				},
+			})
 		}
 	}
 
